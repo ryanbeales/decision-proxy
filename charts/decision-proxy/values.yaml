@@ -1,0 +1,70 @@
+# Default values for decision-proxy.
+
+replicaCount: 1
+image:
+  repository: ghcr.io/ryanbeales/decision-proxy
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: "1.0.0"
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+# Upstream OpenAI-compatible Backend Configuration
+upstream:
+  endpoint: "http://llama-bonsai-2-27b-2bit.llama.svc.cluster.local:8000/v1"
+  model: "llama-bonsai-2-27b-2bit"
+  apiKey: "sk-no-key"
+  # Or reference an existing secret:
+  # existingSecret: "upstream-secret"
+  # apiKeySecretKey: "API_KEY"
+# Optional Thinking / Reasoning defaults
+thinking:
+  defaultEnable: false
+  defaultMaxTokens: 128
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: ""
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: decision-proxy.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 15
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+nodeSelector: {}
+tolerations: []
+affinity: {}

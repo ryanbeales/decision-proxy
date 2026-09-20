@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+*.env
+*.env.*
+*.env.txt
+openaikey*
+jevbench/
+*.log
+*.tgz
+jevbench_full_run_results.json
+.pytest_cache/

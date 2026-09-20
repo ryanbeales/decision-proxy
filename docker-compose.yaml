@@ -1,0 +1,32 @@
+services:
+  decision-proxy:
+    image: ghcr.io/ryanbeales/decision-proxy:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: decision-proxy
+    ports:
+      - "8000:8000"
+    environment:
+      # Upstream OpenAI-compatible chat completions endpoint:
+      # For local llama.cpp / vLLM / Ollama:
+      - UPSTREAM_ENDPOINT=http://host.docker.internal:8000/v1/chat/completions
+      - UPSTREAM_MODEL=llama-bonsai-2-27b-2bit
+      - UPSTREAM_API_KEY=sk-no-key-required
+
+      # Or for OpenAI Cloud:
+      # - UPSTREAM_ENDPOINT=https://api.openai.com/v1/chat/completions
+      # - UPSTREAM_MODEL=gpt-4.1
+      # - UPSTREAM_API_KEY=sk-your-openai-key
+
+      # System-1 vs Limited Thinking Defaults:
+      - DEFAULT_ENABLE_THINKING=false
+      - DEFAULT_MAX_THINKING_TOKENS=128
+      - TIMEOUT_SECONDS=60.0
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

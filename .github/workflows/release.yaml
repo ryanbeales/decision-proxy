@@ -1,0 +1,97 @@
+name: Release & Build
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  release-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node for Semantic Release
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Semantic Release
+        id: semantic
+        uses: cycjimmy/semantic-release-action@v4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          semantic_version: 19
+
+      - name: Setup yq
+        if: steps.semantic.outputs.new_release_published == 'true'
+        uses: dcarbone/install-yq-action@v1
+
+      - name: Update Helm Chart Version
+        if: steps.semantic.outputs.new_release_published == 'true'
+        run: |
+          NEW_VERSION=${{ steps.semantic.outputs.new_release_version }}
+          yq e -i ".appVersion = \"$NEW_VERSION\"" charts/decision-proxy/Chart.yaml
+          yq e -i ".version = \"$NEW_VERSION\"" charts/decision-proxy/Chart.yaml
+          yq e -i ".image.tag = \"$NEW_VERSION\"" charts/decision-proxy/values.yaml
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add charts/decision-proxy/Chart.yaml charts/decision-proxy/values.yaml
+          git commit -m "chore(release): update helm chart to $NEW_VERSION [skip ci]" || echo "No changes to commit"
+          git push
+
+      - name: Login to GitHub Container Registry
+        if: steps.semantic.outputs.new_release_published == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta
+        if: steps.semantic.outputs.new_release_published == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.semantic.outputs.new_release_version }}
+            type=raw,value=latest
+
+      - name: Build and push container
+        if: steps.semantic.outputs.new_release_published == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          file: Dockerfile
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: true
+          pull: true
+
+      - name: Setup Helm
+        if: steps.semantic.outputs.new_release_published == 'true'
+        uses: azure/setup-helm@v4
+
+      - name: Package and Push Helm Chart
+        if: steps.semantic.outputs.new_release_published == 'true'
+        run: |
+          NEW_VERSION=${{ steps.semantic.outputs.new_release_version }}
+          helm package charts/decision-proxy --version $NEW_VERSION --app-version $NEW_VERSION
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+          helm push decision-proxy-$NEW_VERSION.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
