@@ -3,8 +3,11 @@ Core Decision Engine: translates Jev decision primitives into single-token
 logprob requests sent to any OpenAI-compatible backend.
 """
 
+import base64
 import json
 import math
+import mimetypes
+import os
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -12,6 +15,106 @@ import httpx
 
 from .config import settings
 from .models import QuestionDefinition, SystemOneAnswer, UsageInfo
+
+
+def normalize_image(img: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Normalizes diverse image formats (URL, base64 data URI, raw base64, local file path, or dict)
+    into a standard OpenAI-compatible image_url content block.
+    """
+    if isinstance(img, dict):
+        if "image_url" in img and isinstance(img["image_url"], dict):
+            return {"type": "image_url", "image_url": img["image_url"]}
+        if "image_url" in img and isinstance(img["image_url"], str):
+            return {"type": "image_url", "image_url": {"url": img["image_url"]}}
+        if "url" in img and isinstance(img["url"], str):
+            detail = img.get("detail", "auto")
+            return {"type": "image_url", "image_url": {"url": img["url"], "detail": detail}}
+        if img.get("type") == "image_url" and "image_url" in img:
+            return img
+        if "base64" in img:
+            mime = img.get("mime_type", "image/jpeg")
+            return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img['base64']}"}}
+        return {"type": "image_url", "image_url": {"url": str(img)}}
+
+    if isinstance(img, str):
+        img_str = img.strip()
+        if img_str.startswith("http://") or img_str.startswith("https://") or img_str.startswith("data:image/"):
+            return {"type": "image_url", "image_url": {"url": img_str}}
+
+        # Check if local file exists
+        if os.path.isfile(img_str):
+            mime, _ = mimetypes.guess_type(img_str)
+            mime = mime or "image/jpeg"
+            with open(img_str, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("ascii")
+            return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
+
+        # Raw base64 string
+        if len(img_str) > 64 and re.match(r"^[A-Za-z0-9+/=\s]+$", img_str[:128]):
+            clean_b64 = re.sub(r"\s+", "", img_str)
+            return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{clean_b64}"}}
+
+        return {"type": "image_url", "image_url": {"url": img_str}}
+
+    return {"type": "image_url", "image_url": {"url": str(img)}}
+
+
+def extract_images_and_state(
+    state: Union[str, Any],
+    images: Optional[List[Union[str, Dict[str, Any]]]] = None,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Extracts images from explicit arguments or embedded inside state,
+    and returns a clean textual state representation to avoid injecting massive base64 payloads into prompts.
+    """
+    normalized: List[Dict[str, Any]] = []
+    if images:
+        for im in images:
+            if im:
+                normalized.append(normalize_image(im))
+
+    state_text = ""
+    # Check if state itself is an image
+    if isinstance(state, str):
+        s = state.strip()
+        if s.startswith("data:image/") or (s.startswith(("http://", "https://")) and any(s.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"])):
+            normalized.append(normalize_image(s))
+            state_text = "[Image provided]"
+        elif not images and len(s) > 128 and re.match(r"^[A-Za-z0-9+/=\s]+$", s[:128]):
+            # Possible raw base64 image in state
+            normalized.append(normalize_image(s))
+            state_text = "[Image provided]"
+        else:
+            state_text = state
+    elif isinstance(state, dict):
+        if "image_url" in state or "image" in state or "url" in state:
+            im_val = state.get("image_url") or state.get("image") or state.get("url")
+            if im_val:
+                normalized.append(normalize_image(im_val))
+                other_keys = {k: v for k, v in state.items() if k not in ("image_url", "image", "url", "base64")}
+                state_text = json.dumps(other_keys, ensure_ascii=False) if other_keys else "[Image provided]"
+            else:
+                state_text = json.dumps(state, ensure_ascii=False)
+        else:
+            state_text = json.dumps(state, ensure_ascii=False)
+    elif isinstance(state, list):
+        filtered_list = []
+        for item in state:
+            if isinstance(item, dict) and (item.get("type") == "image_url" or "image_url" in item or "image" in item):
+                normalized.append(normalize_image(item))
+            elif isinstance(item, str) and (item.startswith("data:image/") or any(item.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"])):
+                normalized.append(normalize_image(item))
+            else:
+                filtered_list.append(item)
+        if len(filtered_list) != len(state):
+            state_text = json.dumps(filtered_list, ensure_ascii=False) if filtered_list else "[Image provided]"
+        else:
+            state_text = json.dumps(state, ensure_ascii=False)
+    else:
+        state_text = str(state) if state is not None else ""
+
+    return state_text, normalized
 
 
 class DecisionEngine:
@@ -91,6 +194,7 @@ class DecisionEngine:
         enable_thinking: Optional[bool] = None,
         max_thinking_tokens: Optional[int] = None,
         model_override: Optional[str] = None,
+        images: Optional[List[Union[str, Dict[str, Any]]]] = None,
     ) -> Tuple[SystemOneAnswer, UsageInfo, float]:
         """Solves a single Jev question (choice, noul, or score) using logprob extraction."""
         use_thinking = (
@@ -105,10 +209,12 @@ class DecisionEngine:
         )
         max_tokens = (thinking_budget + 16) if use_thinking else 1
 
-        state_text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
+        state_text, normalized_images = extract_images_and_state(state, images)
         qtype = q_def.type
         instructions = q_def.instructions
         criteria = q_def.criteria
+
+        state_block = f"Context / State:\n{state_text}\n\n" if state_text and state_text != "[Image provided]" else ""
 
         # 1. Format prompt by question type
         if qtype == "choice":
@@ -134,7 +240,7 @@ class DecisionEngine:
                 "Respond ONLY with the single best choice letter corresponding to the winning option."
             )
             user_prompt = (
-                f"Context / State:\n{state_text}\n\n"
+                f"{state_block}"
                 f"Objective / Instructions:\n{instructions}\n\n"
                 f"Options:\n" + "\n".join(options_lines) + "\n\n"
                 f"Select the single best option letter ({', '.join(letters)}):"
@@ -151,7 +257,7 @@ class DecisionEngine:
                 "Respond ONLY with Y for Yes, or N for No."
             )
             user_prompt = (
-                f"Context / State:\n{state_text}\n\n"
+                f"{state_block}"
                 f"Policy / Condition to evaluate:\n{instructions}\n"
                 f"Condition for Yes: {desc_true}\n"
                 f"Condition for No:  {desc_false}\n\n"
@@ -179,7 +285,7 @@ class DecisionEngine:
                 "Respond ONLY with the single integer score."
             )
             user_prompt = (
-                f"Context / State:\n{state_text}\n\n"
+                f"{state_block}"
                 f"Scoring Rubric:\n{instructions}\n"
                 + "\n".join(options_lines) + "\n\n"
                 f"Assign a score from ({', '.join(labels)}):"
@@ -187,9 +293,17 @@ class DecisionEngine:
             target_map = {lbl: lbl for lbl in labels}
 
         # 2. Execute upstream API call
+        if normalized_images:
+            user_content: Union[str, List[Dict[str, Any]]] = [
+                {"type": "text", "text": user_prompt},
+                *normalized_images,
+            ]
+        else:
+            user_content = user_prompt
+
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            {"role": "user", "content": user_content},
         ]
 
         data, latency = await self._post_chat_completion(

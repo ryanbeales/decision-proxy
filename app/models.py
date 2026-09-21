@@ -16,10 +16,11 @@ class QuestionDefinition(BaseModel):
 
 
 class SystemOneRequest(BaseModel):
-    state: Union[str, Dict[str, Any], List[Any]]
+    state: Optional[Union[str, Dict[str, Any], List[Any]]] = ""
     model: Optional[str] = None
     questions: Dict[str, QuestionDefinition]
     options: Optional[Dict[str, Any]] = None
+    images: Optional[List[Union[str, Dict[str, Any]]]] = Field(None, description="Optional images (URLs, data URIs, or OpenAI image dicts)")
 
 
 class UsageInfo(BaseModel):
@@ -46,7 +47,9 @@ class SystemOneResponse(BaseModel):
 # --- Direct Decision API Schemas (/v1/decision) ---
 
 class DecisionRequest(BaseModel):
-    context: Union[str, Dict[str, Any], List[Any]] = Field(..., description="Context, document, state or user query")
+    context: Optional[Union[str, Dict[str, Any], List[Any]]] = Field(None, description="Context, document, state or user query")
+    image: Optional[Union[str, Dict[str, Any]]] = Field(None, description="Single image (URL, base64 data URI, or image dict)")
+    images: Optional[List[Union[str, Dict[str, Any]]]] = Field(None, description="List of images (URLs, base64 data URIs, or image dicts)")
     question: str = Field(..., description="Question or classification objective")
     type: Literal["choice", "noul", "score"] = Field("choice", description="Decision primitive type")
     options: Optional[List[str]] = Field(None, description="Candidate options for 'choice' primitive")
