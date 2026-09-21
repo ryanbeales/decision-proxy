@@ -87,12 +87,13 @@ async def systemone_endpoint(req: SystemOneRequest):
 
         for q_key, q_def in req.questions.items():
             ans, usage, _ = await engine.solve_question(
-                state=req.state,
+                state=req.state if req.state is not None else "",
                 q_key=q_key,
                 q_def=q_def,
                 enable_thinking=enable_thinking,
                 max_thinking_tokens=max_thinking,
                 model_override=req.model,
+                images=req.images,
             )
             answers[q_key] = ans
             total_input_tokens += usage.input_tokens
@@ -133,13 +134,20 @@ async def direct_decision_endpoint(req: DecisionRequest):
             labels=req.options,
         )
 
+        images = []
+        if req.image:
+            images.append(req.image)
+        if req.images:
+            images.extend(req.images)
+
         ans, usage, latency = await engine.solve_question(
-            state=req.context,
+            state=req.context if req.context is not None else "",
             q_key="decision",
             q_def=q_def,
             enable_thinking=req.enable_thinking,
             max_thinking_tokens=req.max_thinking_tokens,
             model_override=req.model,
+            images=images if images else None,
         )
 
         selected: Any
